@@ -117,9 +117,9 @@ impl Phrases {
 			while reader.bit() {
 				n = n.saturating_add(1 << bits);
 			}
-			// The low bit of the remainder is always present; the rest exist only if the
-			// step size is wide enough to need them.
-			if reader.bit() {
+			// A step of one leaves no remainder to store, and reading a bit for one anyway
+			// throws off every length after it.
+			if bits > 0 && reader.bit() {
 				n += 1;
 			}
 			for shift in 1..bits.min(5) {
@@ -312,6 +312,19 @@ mod tests {
 		let p = Phrases::parse_hall(&index, b"abcdef").unwrap();
 		assert_eq!(p.phrase(0), b"ab");
 		assert_eq!(p.phrase(1), b"cdef");
+	}
+
+	#[test]
+	fn hall_lengths_in_steps_of_one_have_no_remainder_bits() {
+		let mut index = vec![0u8; PHRINDEX_HEADER_LEN];
+		index[4..8].copy_from_slice(&2u32.to_le_bytes());
+		index[12..16].copy_from_slice(&3u32.to_le_bytes());
+		index[16..20].copy_from_slice(&3u32.to_le_bytes());
+		// The first phrase is a clear bit, for length one. The second is a set bit and a clear
+		// one, for length two. Lowest bit first.
+		index.extend_from_slice(&0b010u32.to_le_bytes());
+		let p = Phrases::parse_hall(&index, b"abc").unwrap();
+		assert_eq!(p.expand(&[0, 2], 8), b"abc");
 	}
 
 	#[test]
