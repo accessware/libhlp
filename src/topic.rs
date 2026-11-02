@@ -15,7 +15,7 @@ use crate::{
 	paragraph::{self, Paragraph, TL_DISPLAY, TL_DISPLAY30, TL_TABLE, TL_TOPICHDR},
 	phrase::Phrases,
 	table::Block,
-	text,
+	text::Decoder,
 };
 
 /// Bytes in a `TOPICBLOCKHEADER`, and so the position the first record sits at.
@@ -158,7 +158,7 @@ impl TopicLink {
 ///
 /// A record that cannot be read ends the walk, keeping the topics gathered so far, since a
 /// help file with one damaged topic is still worth the rest of its text.
-pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts, before31: bool) -> Vec<Topic> {
+pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts, before31: bool, decoder: Decoder) -> Vec<Topic> {
 	let header_len = if before31 { TOPIC_HEADER_LEN_30 } else { TOPIC_HEADER_LEN };
 	let mut topics = Vec::new();
 	let mut current: Option<Topic> = None;
@@ -195,11 +195,11 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts, before31: bool) -
 			TL_TOPICHDR if data1.len() >= header_len => {
 				topics.extend(current.take());
 				current =
-					Some(Topic { number, offset, title: text::decode_cstr(topic_title(&data2)), blocks: Vec::new() });
+					Some(Topic { number, offset, title: decoder.decode_cstr(topic_title(&data2)), blocks: Vec::new() });
 				number += 1;
 			}
 			TL_DISPLAY30 | TL_DISPLAY | TL_TABLE => {
-				let record = paragraph::parse(link.record_type, &data1, &data2, fonts);
+				let record = paragraph::parse(link.record_type, &data1, &data2, fonts, decoder);
 				offset = offset.saturating_add(record.topic_length);
 				if let Some(topic) = current.as_mut() {
 					append_blocks(&mut topic.blocks, record.blocks);
@@ -397,7 +397,7 @@ mod tests {
 	fn a_topic_header_followed_by_text_makes_one_topic() {
 		let payload = chain(&[topic_header_parts("Intro"), display_parts("Body text.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252);
 		assert_eq!(topics.len(), 1);
 		assert_eq!(topics[0].title, "Intro");
 		assert_eq!(topics[0].number, FIRST_TOPIC_NUMBER);
@@ -413,7 +413,7 @@ mod tests {
 			display_parts("Two"),
 		]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 1024);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252);
 		assert_eq!(topics.len(), 2);
 		assert_eq!(topics[0].title, "First");
 		assert_eq!(topics[0].text(), "One");
@@ -428,7 +428,7 @@ mod tests {
 	fn several_records_accumulate_into_one_topic() {
 		let payload = chain(&[topic_header_parts("T"), display_parts("First."), display_parts("Second.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252);
 		assert_eq!(topics.len(), 1);
 		assert_eq!(
 			topics[0].text(),
@@ -443,7 +443,7 @@ Second."
 	fn the_terminating_record_is_not_a_topic() {
 		let payload = chain(&[]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 64);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252).is_empty());
 	}
 
 	/// Chain records the WinHelp 3.0 way: each names the distance to the next rather than
@@ -468,7 +468,7 @@ Second."
 			(TL_TOPICHDR, vec![0u8; TOPIC_HEADER_LEN_30], b"Second ".to_vec()),
 		]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default(), true);
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), true, Decoder::Windows1252);
 		assert_eq!(topics.len(), 2);
 		assert_eq!(topics[0].title, "First");
 		assert_eq!(topics[0].text(), "Body.");
@@ -484,9 +484,9 @@ Second."
 			(TL_DISPLAY30, display_30_commands(), b"Text. ".to_vec()),
 		];
 		let b = blocks(&[chain_30(&parts)], BLOCK_HEADER_LEN + 512);
-		assert_eq!(walk(&b, &Phrases::default(), &Fonts::default(), true).len(), 1);
+		assert_eq!(walk(&b, &Phrases::default(), &Fonts::default(), true, Decoder::Windows1252).len(), 1);
 		// The same file read as 3.1 finds no header long enough to start a topic.
-		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252).is_empty());
 	}
 
 	/// `LinkData1` for a 3.0 display record, which has no topic length field.
@@ -504,13 +504,13 @@ Second."
 	fn a_record_pointing_at_itself_ends_the_walk() {
 		let payload = record(TL_TOPICHDR, BLOCK_HEADER_LEN as u32, &[0u8; TOPIC_HEADER_LEN], b"Loop ", 5);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 256);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252).is_empty());
 	}
 
 	#[test]
 	fn an_empty_topic_file_yields_no_topics() {
 		let b = Blocks::new(&[], 512, STRIDE, false);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false, Decoder::Windows1252).is_empty());
 	}
 
 	#[test]

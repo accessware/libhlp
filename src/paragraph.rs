@@ -10,7 +10,7 @@ use crate::{
 	format::Reader,
 	link::{Link, Target},
 	table::{Block, TableBuilder},
-	text,
+	text::Decoder,
 };
 
 /// A WinHelp 3.0 displayable record.
@@ -120,10 +120,10 @@ mod settings {
 ///
 /// Malformed command or text streams end the record rather than failing the file: a help
 /// file with one bad topic should still give up the rest of its topics.
-pub fn parse(record_type: u8, data1: &[u8], data2: &[u8], fonts: &Fonts) -> Record {
+pub fn parse(record_type: u8, data1: &[u8], data2: &[u8], fonts: &Fonts, decoder: Decoder) -> Record {
 	let mut cmds = Reader::new(data1);
 	let mut strings = Reader::new(data2);
-	let mut out = Paragraphs::new(fonts);
+	let mut out = Paragraphs::new(fonts, decoder);
 	// TopicSize, which counts bytes and is of no use once the record is already in hand.
 	let _ = cmds.clong();
 	let topic_length =
@@ -237,7 +237,7 @@ fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Para
 			// A macro hotspot, whose text is the macro to run.
 			0xC8 | 0xCC => {
 				let body = counted_body(cmds)?;
-				out.start_link(Link::jump(Target::Macro(text::decode_cstr(body))));
+				out.start_link(Link::jump(Target::Macro(out.decoder.decode_cstr(body))));
 			}
 			// A WinHelp 3.0 jump, which names its target by topic number.
 			0xE0 | 0xE1 => {
@@ -255,7 +255,7 @@ fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Para
 			0xEA | 0xEB | 0xEE | 0xEF => {
 				let body = counted_body(cmds)?;
 				let popup = cmd == 0xEA || cmd == 0xEB;
-				out.start_link(parse_external(body, popup));
+				out.start_link(parse_external(body, popup, out.decoder));
 			}
 			// A non-breaking space or hyphen, whose character is already in the text
 			// stream, and anything unrecognised, which WinHelp also treats as one byte.
@@ -313,13 +313,13 @@ fn counted_body<'a>(cmds: &mut Reader<'a>) -> Option<&'a [u8]> {
 }
 
 /// Interpret the body of an external or secondary-window jump.
-fn parse_external(body: &[u8], popup: bool) -> Link {
+fn parse_external(body: &[u8], popup: bool, decoder: Decoder) -> Link {
 	let mut r = Reader::new(body);
 	let Ok(kind) = r.u8() else { return Link::jump(Target::Context(0)) };
 	let context = r.u32().unwrap_or(0);
 	// Type 4 and 6 name another help file; 0 and 1 open a window on this one.
 	let file = match kind {
-		4 | 6 => text::decode_cstr(r.cstr().unwrap_or_default()),
+		4 | 6 => decoder.decode_cstr(r.cstr().unwrap_or_default()),
 		_ => String::new(),
 	};
 	let target = if file.is_empty() { Target::Context(context) } else { Target::External { file, context } };
@@ -329,6 +329,7 @@ fn parse_external(body: &[u8], popup: bool) -> Link {
 /// Collects runs into paragraphs while a record is read.
 struct Paragraphs<'a> {
 	fonts: &'a Fonts,
+	decoder: Decoder,
 	done: Vec<Paragraph>,
 	current: Paragraph,
 	link: Option<Link>,
@@ -336,8 +337,8 @@ struct Paragraphs<'a> {
 }
 
 impl<'a> Paragraphs<'a> {
-	fn new(fonts: &'a Fonts) -> Self {
-		Self { fonts, done: Vec::new(), current: Paragraph::default(), link: None, format: Format::default() }
+	fn new(fonts: &'a Fonts, decoder: Decoder) -> Self {
+		Self { fonts, decoder, done: Vec::new(), current: Paragraph::default(), link: None, format: Format::default() }
 	}
 
 	fn push(&mut self, run: Run) {
@@ -356,7 +357,7 @@ impl<'a> Paragraphs<'a> {
 		if self.link.is_some() {
 			format.underline = false;
 		}
-		self.push(Run::Text { text: text::decode(bytes), format, link: self.link.clone() });
+		self.push(Run::Text { text: self.decoder.decode(bytes), format, link: self.link.clone() });
 	}
 
 	fn set_font(&mut self, font: u16) {
@@ -420,7 +421,7 @@ mod tests {
 
 	/// Parse a record against an empty font table, for the cases that ignore emphasis.
 	fn plain(record_type: u8, data1: &[u8], data2: &[u8]) -> Record {
-		parse(record_type, data1, data2, &Fonts::default())
+		parse(record_type, data1, data2, &Fonts::default(), Decoder::Windows1252)
 	}
 
 	impl Record {
@@ -500,7 +501,13 @@ mod tests {
 		cmds.extend_from_slice(&font_change(1));
 		cmds.extend_from_slice(&font_change(0));
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["plain ", "bold ", "plain again"]), &test_fonts());
+		let record = parse(
+			TL_DISPLAY,
+			&cmds,
+			&strings(&["plain ", "bold ", "plain again"]),
+			&test_fonts(),
+			Decoder::Windows1252,
+		);
 		let runs = &record.paragraphs()[0].runs;
 		assert_eq!(runs[0], Run::Text { text: "plain ".into(), format: Format::default(), link: None });
 		let bold = Format { bold: true, ..Format::default() };
@@ -521,7 +528,8 @@ mod tests {
 		cmds.push(0xFF);
 		// One string is emitted before each command, so the two bare commands ahead of the
 		// hotspot text each consume an empty one.
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "", "click", " after"]), &test_fonts());
+		let record =
+			parse(TL_DISPLAY, &cmds, &strings(&["", "", "click", " after"]), &test_fonts(), Decoder::Windows1252);
 		let runs = &record.paragraphs()[0].runs;
 		let Run::Text { format, link: Some(_), .. } = &runs[0] else { panic!("expected a hotspot") };
 		assert!(!format.underline);

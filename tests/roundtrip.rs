@@ -72,6 +72,23 @@ fn system_file(title: &str) -> Vec<u8> {
 	buf
 }
 
+/// A `|SYSTEM` file with a title in raw bytes and, if given, an LCID record.
+fn system_file_for(title: &[u8], lcid: Option<u16>) -> Vec<u8> {
+	let mut buf = system_file("");
+	buf.truncate(12);
+	buf.extend_from_slice(&1u16.to_le_bytes());
+	buf.extend_from_slice(&((title.len() + 1) as u16).to_le_bytes());
+	buf.extend_from_slice(title);
+	buf.push(0);
+	if let Some(lcid) = lcid {
+		buf.extend_from_slice(&9u16.to_le_bytes());
+		buf.extend_from_slice(&10u16.to_le_bytes());
+		buf.extend_from_slice(&[0; 8]);
+		buf.extend_from_slice(&lcid.to_le_bytes());
+	}
+	buf
+}
+
 /// One record of `|TOPIC`: its header, then both data streams.
 fn record(kind: u8, next: u32, data1: &[u8], data2: &[u8]) -> Vec<u8> {
 	let data_len1 = (LINK_LEN + data1.len()) as u32;
@@ -245,6 +262,49 @@ fn a_whole_file_reads_back_its_topics() {
 	// Topic numbers count from 16, as WinHelp does.
 	assert_eq!(topics[0].number, 16);
 	assert_eq!(topics[1].number, 17);
+}
+
+/// One topic whose body is `body`, in raw bytes.
+fn topic_of(body: &[u8]) -> Vec<u8> {
+	let mut text = body.to_vec();
+	text.push(0);
+	topic_file(&[Part::Header("Topic".into()), Part::Display(display_commands(body.len() as u16, &[0xFF]), text)])
+}
+
+#[test]
+fn the_lcid_names_the_code_page_of_the_text_and_title() {
+	// "\u{30A4}\u{30F3}\u{30B9}" in Shift-JIS, whose second bytes would be 1252 punctuation.
+	let sjis = [0x83, 0x43, 0x83, 0x93, 0x83, 0x58];
+	let file = build(&[("|SYSTEM", system_file_for(&sjis, Some(0x0411))), ("|TOPIC", topic_of(&sjis))]);
+	let hlp = HlpFile::from_bytes(file).unwrap();
+	assert_eq!(hlp.lcid(), Some(0x0411));
+	assert_eq!(hlp.encoding(), encoding_rs::SHIFT_JIS);
+	assert_eq!(hlp.title(), Some("\u{30A4}\u{30F3}\u{30B9}"));
+	assert_eq!(hlp.topics().unwrap()[0].text(), "\u{30A4}\u{30F3}\u{30B9}");
+}
+
+// WinHelp 3.1 has no LCID record, so Cyrillic can only be told from its text.
+#[test]
+fn a_file_with_no_lcid_and_another_script_is_detected() {
+	let russian = "\u{0412}\u{0432}\u{0435}\u{0434}\u{0435}\u{043D}\u{0438}\u{0435} \u{0432} \u{0441}\u{0438}\u{0441}\u{0442}\u{0435}\u{043C}\u{0443} \u{0438} \u{043E}\u{043F}\u{0438}\u{0441}\u{0430}\u{043D}\u{0438}\u{0435} \u{043F}\u{0440}\u{043E}\u{0433}\u{0440}\u{0430}\u{043C}\u{043C}\u{044B}. ".repeat(4);
+	let bytes = encoding_rs::WINDOWS_1251.encode(&russian).0.into_owned();
+	let file = build(&[("|SYSTEM", system_file("Help")), ("|TOPIC", topic_of(&bytes))]);
+	let hlp = HlpFile::from_bytes(file).unwrap();
+	assert_eq!(hlp.encoding(), encoding_rs::WINDOWS_1251);
+	assert!(hlp.topics().unwrap()[0].text().starts_with("\u{0412}\u{0432}\u{0435}\u{0434}"));
+}
+
+// Detection only runs on text that can't be Western, so a French file can't be mistaken for
+// some other code page however many accents it has.
+#[test]
+fn western_text_with_accents_stays_windows_1252() {
+	let french =
+		"Le caf\u{E9} est pr\u{EA}t \u{E0} \u{EA}tre servi dans la pi\u{E8}ce o\u{F9} l'on a mang\u{E9}. ".repeat(12);
+	let bytes = encoding_rs::WINDOWS_1252.encode(&french).0.into_owned();
+	let file = build(&[("|SYSTEM", system_file_for(b"Aide", Some(0x040C))), ("|TOPIC", topic_of(&bytes))]);
+	let hlp = HlpFile::from_bytes(file).unwrap();
+	assert_eq!(hlp.encoding(), encoding_rs::WINDOWS_1252);
+	assert_eq!(hlp.topics().unwrap()[0].text(), french);
 }
 
 // A link stores the hash of its target's context string, so reading one back has to go

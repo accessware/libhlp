@@ -14,6 +14,8 @@ categories = ["parser-implementations", "compression", "filesystem"]
 exclude = [".claude/", "prek.toml", "rustfmt.toml"]
 
 [dependencies]
+chardetng = "1.0.0"
+encoding_rs = "0.8.44"
 thiserror = "2.0.20"
 
 [lints.rust]

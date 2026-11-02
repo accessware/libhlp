@@ -2,6 +2,9 @@
 
 use std::{collections::HashMap, fmt, fs, path::Path};
 
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::Encoding;
+
 use crate::{
 	btree::Btree,
 	error::{HlpError, Result},
@@ -10,9 +13,16 @@ use crate::{
 	link::{Link, Target},
 	phrase::Phrases,
 	system::System,
-	text,
+	text::{self, Decoder},
 	topic::{self, Blocks, Topic},
 };
+
+/// Below this many non-ASCII bytes there is too little to tell a code page from.
+const MIN_NON_ASCII_BYTES: usize = 40;
+
+/// The percentage of non-ASCII bytes above which text is not Western: accented letters in a
+/// Western language stay well under it, while other scripts sit far over it.
+const MIN_NON_ASCII_PERCENT: usize = 15;
 
 /// What the internal directory is called in errors. It is found by offset from the file
 /// header rather than by name, so it has no name of its own.
@@ -52,6 +62,7 @@ pub struct HlpFile {
 	directory: HashMap<String, u32>,
 	system: System,
 	contexts: HashMap<u32, u32>,
+	encoding: &'static Encoding,
 }
 
 impl fmt::Debug for HlpFile {
@@ -92,8 +103,10 @@ impl HlpFile {
 		let directory = read_directory(&data, header.directory_start)?;
 		let system_offset = *directory.get(SYSTEM).ok_or_else(|| HlpError::NotFound(SYSTEM.into()))?;
 		let system = System::parse(format::internal_file_at(&data, system_offset)?)?;
-		let mut hlp = Self { data, directory, system, contexts: HashMap::new() };
+		let mut hlp = Self { data, directory, system, contexts: HashMap::new(), encoding: encoding_rs::WINDOWS_1252 };
 		hlp.contexts = hlp.read_contexts();
+		hlp.encoding = hlp.pick_encoding();
+		hlp.system.decode_strings(Decoder::of(hlp.encoding));
 		Ok(hlp)
 	}
 
@@ -117,11 +130,26 @@ impl HlpFile {
 
 	/// The Windows character set the file declares, if it declares one.
 	///
-	/// Text is decoded as Windows-1252 regardless. A caller that needs another code page
-	/// can re-decode the bytes from [`Self::read_file`].
+	/// This field is unreliable, so text is not decoded by it: see [`Self::encoding`].
 	#[must_use]
 	pub const fn charset(&self) -> Option<u16> {
 		self.system.charset
+	}
+
+	/// The language the file was compiled for, if it says.
+	#[must_use]
+	pub const fn lcid(&self) -> Option<u16> {
+		self.system.lcid
+	}
+
+	/// The code page the file's text is decoded from.
+	///
+	/// This is the code page of the file's [`Self::lcid`] where that is not a Western one.
+	/// Otherwise it is Windows-1252, unless so much of the text is non-ASCII that it can't
+	/// be, in which case the code page is detected from the text.
+	#[must_use]
+	pub const fn encoding(&self) -> &'static Encoding {
+		self.encoding
 	}
 
 	/// Topic offset of the topic WinHelp opens the file on.
@@ -152,21 +180,47 @@ impl HlpFile {
 	/// Returns [`HlpError::NotFound`] if the file has no `|TOPIC`, which means it holds no
 	/// help text at all.
 	pub fn topics(&self) -> Result<Vec<Topic>> {
+		let mut topics = self.walk_topics(Decoder::of(self.encoding))?;
+		self.apply_stored_titles(&mut topics);
+		Ok(topics)
+	}
+
+	fn walk_topics(&self, decoder: Decoder) -> Result<Vec<Topic>> {
 		let raw = self.read_file(TOPIC)?;
 		let blocks = Blocks::new(raw, self.system.block_size, self.system.decompress_size, self.system.compressed);
 		let phrases = self.phrases();
-		let fonts = self.fonts();
-		let mut topics = topic::walk(&blocks, &phrases, &fonts, self.system.before31);
-		self.apply_stored_titles(&mut topics);
-		Ok(topics)
+		let fonts = self.fonts(decoder);
+		Ok(topic::walk(&blocks, &phrases, &fonts, self.system.before31, decoder))
+	}
+
+	/// Non-Western files with no usable LCID are told apart by their text: a WinHelp 3.1
+	/// file has no LCID at all, and some files claim US English over another script.
+	fn pick_encoding(&self) -> &'static Encoding {
+		if let Some(encoding) = self.system.lcid.and_then(text::encoding_for_lcid) {
+			return encoding;
+		}
+		let Ok(topics) = self.walk_topics(Decoder::Bytes) else { return encoding_rs::WINDOWS_1252 };
+		// `Decoder::Bytes` made every byte the code point of the same number.
+		let bytes: Vec<u8> = topics
+			.iter()
+			.flat_map(|topic| topic.title.chars().chain(topic.text().chars()).collect::<Vec<_>>())
+			.filter_map(|ch| u8::try_from(u32::from(ch)).ok())
+			.collect();
+		let non_ascii = bytes.iter().filter(|b| !b.is_ascii()).count();
+		if non_ascii < MIN_NON_ASCII_BYTES || non_ascii * 100 < bytes.len() * MIN_NON_ASCII_PERCENT {
+			return encoding_rs::WINDOWS_1252;
+		}
+		let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
+		detector.feed(&bytes, true);
+		detector.guess(None, Utf8Detection::Deny)
 	}
 
 	/// Load the font table, if the file has a readable one.
 	///
 	/// A file with no `|FONT`, or a damaged one, reads as no emphasis anywhere: that costs
 	/// the caller its bold and italic, not its text.
-	fn fonts(&self) -> Fonts {
-		self.read_file(FONT).ok().and_then(|buf| Fonts::parse(buf).ok()).unwrap_or_default()
+	fn fonts(&self, decoder: Decoder) -> Fonts {
+		self.read_file(FONT).ok().and_then(|buf| Fonts::parse_with(buf, decoder).ok()).unwrap_or_default()
 	}
 
 	/// Load whichever phrase table the file uses, if it uses one.
@@ -236,7 +290,8 @@ impl HlpFile {
 	pub fn titles(&self) -> Result<HashMap<u32, String>> {
 		let buf = self.read_file(TITLES)?;
 		let tree = Btree::parse(buf, TITLES)?;
-		let entries = tree.entries(|r| Ok((r.u32()?, text::decode(r.cstr()?))))?;
+		let decoder = Decoder::of(self.encoding);
+		let entries = tree.entries(|r| Ok((r.u32()?, decoder.decode(r.cstr()?))))?;
 		Ok(entries.into_iter().collect())
 	}
 }

@@ -133,7 +133,7 @@ What is read: topic text and titles, paragraph and line structure, tables as row
 
 ## Text encoding
 
-WinHelp predates Unicode and stores text in a single-byte Windows code page. This crate decodes as Windows-1252, which is right for Western European files. `HlpFile::charset` reports what the file claims, so a caller that needs another code page can re-decode the bytes itself.
+WinHelp predates Unicode and stores text in a Windows code page, which may be a double-byte one. This crate decodes by the file's LCID where that names a non-Western language, and otherwise as Windows-1252, unless the text is plainly in another script, in which case the code page is detected from the text. `HlpFile::encoding` reports the choice.
 
 ## Robustness
 

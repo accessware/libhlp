@@ -8,7 +8,7 @@
 use crate::{
 	error::{HlpError, Result},
 	format::Reader,
-	text,
+	text::Decoder,
 };
 
 /// Bytes in the fixed part of the `|FONT` header.
@@ -90,6 +90,11 @@ impl Fonts {
 	/// Returns [`HlpError::BadFont`] if the header is too short or describes a descriptor
 	/// array that starts before the face names it follows.
 	pub fn parse(buf: &[u8]) -> Result<Self> {
+		Self::parse_with(buf, Decoder::Windows1252)
+	}
+
+	/// Parse a `|FONT` file whose face names are in `decoder`'s code page.
+	pub(crate) fn parse_with(buf: &[u8], decoder: Decoder) -> Result<Self> {
 		if buf.len() < HEADER_LEN {
 			return Err(HlpError::BadFont("truncated header"));
 		}
@@ -102,7 +107,7 @@ impl Fonts {
 		if descriptors_offset < faces_offset {
 			return Err(HlpError::BadFont("descriptors start before face names"));
 		}
-		let faces = read_faces(buf, faces_offset, descriptors_offset, face_count);
+		let faces = read_faces(buf, faces_offset, descriptors_offset, face_count, decoder);
 		// Which descriptor layout a file uses is not stated anywhere. It is inferred from
 		// how much room the header left itself: a header with style or character-map
 		// fields pushes the face names further out, and those are the newer formats.
@@ -206,7 +211,7 @@ fn face_at(faces: &[String], index: u16) -> String {
 }
 
 /// Read the face name array, which is a run of fixed width, possibly unterminated strings.
-fn read_faces(buf: &[u8], start: u16, end: u16, count: usize) -> Vec<String> {
+fn read_faces(buf: &[u8], start: u16, end: u16, count: usize, decoder: Decoder) -> Vec<String> {
 	if count == 0 {
 		return Vec::new();
 	}
@@ -217,7 +222,7 @@ fn read_faces(buf: &[u8], start: u16, end: u16, count: usize) -> Vec<String> {
 	(0..count)
 		.map_while(|i| {
 			let at = usize::from(start) + i * width;
-			buf.get(at..at + width).map(text::decode_cstr)
+			buf.get(at..at + width).map(|face| decoder.decode_cstr(face))
 		})
 		.collect()
 }
