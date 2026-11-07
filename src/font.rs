@@ -340,7 +340,7 @@ mod tests {
 	fn a_file_with_no_fonts_parses_to_an_empty_table() {
 		let buf = old_font_file(&[], &[]);
 		let fonts = Fonts::parse(&buf).unwrap();
-		assert!(fonts.fonts().is_empty());
+		assert_eq!(fonts.fonts(), []);
 		assert!(fonts.format(0).is_plain());
 	}
 

@@ -150,7 +150,7 @@ mod tests {
 
 	#[test]
 	fn empty_input_gives_empty_output() {
-		assert!(decompress(&[], 64).is_empty());
+		assert_eq!(decompress(&[], 64), [] as [u8; 0]);
 	}
 
 	// The window is zero filled, so a reference reaching behind the stream reads zeroes

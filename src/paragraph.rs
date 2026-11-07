@@ -713,6 +713,6 @@ mod tests {
 		let mut cmds = display_prologue(0);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&[""]));
-		assert!(record.paragraphs().is_empty());
+		assert_eq!(record.paragraphs(), [] as [&Paragraph; 0]);
 	}
 }

@@ -81,9 +81,7 @@ impl HlpFile {
 	///
 	/// # Errors
 	///
-	/// Returns [`HlpError::BadMagic`] if the file is not a WinHelp file at all, and
-	/// [`HlpError::UnsupportedVersion`] for a WinHelp 3.0 file, which this crate does not
-	/// read yet.
+	/// Returns [`HlpError::BadMagic`] if the file is not a WinHelp file at all.
 	pub fn open(path: impl AsRef<Path>) -> Result<Self> {
 		Self::from_bytes(fs::read(path)?)
 	}

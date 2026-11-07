@@ -76,7 +76,6 @@ impl Block {
 	}
 
 	/// Every paragraph the block holds, in reading order.
-	#[must_use]
 	pub fn paragraphs(&self) -> Box<dyn Iterator<Item = &Paragraph> + '_> {
 		match self {
 			Self::Paragraph(p) => Box::new(std::iter::once(p)),
